@@ -10,6 +10,8 @@
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
     <!-- Font Awesome for simple icons -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+    <!-- PWA Manifest -->
+    <link rel="manifest" href="manifest.json">
     <!-- Firebase SDKs -->
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
@@ -17,10 +19,22 @@
         import { getFirestore, doc, setDoc, getDoc, updateDoc, collection, query, onSnapshot, runTransaction, getDocs } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
         import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
-        // Konfiguracja i Inicjalizacja Firebase (MANDATORY GLOBALS)
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
-        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+        // Konfiguracja i Inicjalizacja Firebase (TERAZ Z RĘCZNIE WPROWADZONYMI KLUCZAMI)
+        // Używamy statycznego ID, bo to zewnetrzny hosting, który nie dostarcza __app_id
+        const appId = 'ali-mistrzowie-mnozenia'; 
+        
+        // === WPROWADZONA KONFIGURACJA Z KONSOLI FIREBASE ===
+        const firebaseConfig = {
+            apiKey: "AIzaSyAotvq-QkxFnsnCGomWKBf9DLEHeDNU6SI",
+            authDomain: "ali-mistrzowie-mnozenia.firebaseapp.com",
+            projectId: "ali-mistrzowie-mnozenia",
+            storageBucket: "ali-mistrzowie-mnozenia.firebasestorage.app",
+            messagingSenderId: "69323239967",
+            appId: "1:69323239967:web:e8b60481b8adb8e7205b2a",
+            measurementId: "G-0PPRPMMEPC"
+        };
+        // Token początkowy jest pomijany, bo logujemy anonimowo:
+        const initialAuthToken = null; 
 
         let app, db, auth;
         let userId = null;
@@ -81,7 +95,7 @@
 
         function getProgressDocRef() {
             if (!userId || !db) return null;
-            // Prywatna ścieżka danych: /artifacts/{appId}/users/{userId}/learning_progress/data
+            // Ścieżka danych jest zgodna z regułami Firestore: /artifacts/{appId}/users/{userId}/learning_progress/data
             return doc(db, 'artifacts', appId, 'users', userId, PROGRESS_COLLECTION, 'data');
         }
 
@@ -101,7 +115,6 @@
                     console.log("Postęp wczytany/zaktualizowany.");
                     
                     if (!initialProblemGenerated) {
-                        // Jeśli to pierwsze ładowanie, generujemy problem
                         generateNewProblem();
                         initialProblemGenerated = true;
                     }
