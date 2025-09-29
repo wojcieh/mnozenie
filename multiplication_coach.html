@@ -1,0 +1,485 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mnożenie dla Małych Mistrzów (5-8 lat)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
+    <!-- Font Awesome for simple icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+    <!-- Firebase SDKs -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, getDoc, updateDoc, collection, query, onSnapshot, runTransaction, getDocs } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Konfiguracja i Inicjalizacja Firebase (MANDATORY GLOBALS)
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        let app, db, auth;
+        let userId = null;
+        let isAuthReady = false;
+        let initialProblemGenerated = false;
+
+        const STATE = {
+            progress: {}, // Przechowuje statystyki dla każdego działania (np. "3x4": {correct: 5, attempts: 6, difficulty: 1})
+            currentProblem: { a: 0, b: 0, result: 0 },
+            totalScore: 0,
+            streak: 0,
+            parentView: false,
+            feedbackMessage: '',
+            isSaving: false
+        };
+
+        const MAX_FACTOR = 10;
+        const MIN_DIFFICULTY = 1;
+        const MAX_DIFFICULTY = 10;
+        const PROGRESS_COLLECTION = 'learning_progress';
+        
+        // Ustaw poziom logowania (dla debugowania)
+        setLogLevel('Debug');
+
+        async function initializeFirebase() {
+            try {
+                app = initializeApp(firebaseConfig);
+                auth = getAuth(app);
+                db = getFirestore(app);
+
+                // Autentykacja
+                onAuthStateChanged(auth, async (user) => {
+                    if (user) {
+                        userId = user.uid;
+                    } else {
+                        try {
+                            if (initialAuthToken) {
+                                await signInWithCustomToken(auth, initialAuthToken);
+                            } else {
+                                await signInAnonymously(auth);
+                            }
+                            userId = auth.currentUser?.uid || crypto.randomUUID();
+                        } catch (error) {
+                            console.error("Błąd autentykacji:", error);
+                            userId = crypto.randomUUID(); // Fallback
+                        }
+                    }
+                    isAuthReady = true;
+                    console.log("Gotowy do pracy. User ID:", userId);
+                    loadProgress();
+                });
+
+            } catch (error) {
+                console.error("Krytyczny błąd inicjalizacji Firebase:", error);
+                isAuthReady = true; // Zezwól na kontynuację bez ładowania postępów
+            }
+        }
+
+        function getProgressDocRef() {
+            if (!userId || !db) return null;
+            // Prywatna ścieżka danych: /artifacts/{appId}/users/{userId}/learning_progress/data
+            return doc(db, 'artifacts', appId, 'users', userId, PROGRESS_COLLECTION, 'data');
+        }
+
+        function loadProgress() {
+            if (!isAuthReady || !db || !userId) return;
+
+            const docRef = getProgressDocRef();
+            if (!docRef) return;
+
+            // Używamy onSnapshot dla aktualizacji w czasie rzeczywistym
+            onSnapshot(docRef, (docSnap) => {
+                if (docSnap.exists()) {
+                    const data = docSnap.data();
+                    STATE.progress = data.progress || {};
+                    STATE.totalScore = data.totalScore || 0;
+                    STATE.streak = data.streak || 0;
+                    console.log("Postęp wczytany/zaktualizowany.");
+                    
+                    if (!initialProblemGenerated) {
+                        // Jeśli to pierwsze ładowanie, generujemy problem
+                        generateNewProblem();
+                        initialProblemGenerated = true;
+                    }
+
+                    renderApp();
+                    
+                } else {
+                    console.log("Brak postępu. Inicjalizacja nowego.");
+                    if (!initialProblemGenerated) {
+                        generateNewProblem();
+                        initialProblemGenerated = true;
+                    }
+                    renderApp();
+                }
+            }, (error) => {
+                console.error("Błąd ładowania postępu w czasie rzeczywistym:", error);
+            });
+        }
+        
+        // --- LOGIKA ADAPTACYJNA (Regułowa) ---
+        
+        /**
+         * Zapisuje postęp do Firestore. Używa runTransaction dla bezpieczeństwa danych.
+         */
+        async function saveProgress() {
+            if (!isAuthReady || !db || STATE.isSaving) {
+                console.log("Nie można zapisać, autoryzacja niegotowa lub trwa zapis.");
+                return;
+            }
+            STATE.isSaving = true;
+
+            try {
+                await runTransaction(db, async (transaction) => {
+                    const docRef = getProgressDocRef();
+                    
+                    const newProgress = {
+                        progress: STATE.progress,
+                        totalScore: STATE.totalScore,
+                        streak: STATE.streak,
+                        lastUpdated: new Date().toISOString()
+                    };
+
+                    transaction.set(docRef, newProgress);
+                });
+                console.log("Postęp zapisany pomyślnie.");
+            } catch (error) {
+                console.error("Błąd transakcji zapisu postępu:", error);
+            } finally {
+                STATE.isSaving = false;
+            }
+        }
+
+        /**
+         * Dynamicznie dobiera następne zadanie w oparciu o reguły (nie ML).
+         */
+        function generateNewProblem() {
+            const problems = [];
+            for (let a = 1; a <= MAX_FACTOR; a++) {
+                for (let b = 1; b <= MAX_FACTOR; b++) {
+                    const key = `${a}x${b}`;
+                    const stats = STATE.progress[key] || { correct: 0, attempts: 0, difficulty: MIN_DIFFICULTY };
+                    
+                    // Wskaźnik "trudności" na podstawie statystyk
+                    let difficultyScore = 0;
+                    if (stats.attempts > 0) {
+                        const errorRate = 1 - (stats.correct / stats.attempts);
+                        difficultyScore = errorRate * 10; // 10 dla 100% błędów, 0 dla 0%
+                    }
+
+                    // Ustawienie poziomu trudności dla problemu w State
+                    stats.difficulty = Math.ceil(difficultyScore) || MIN_DIFFICULTY; 
+                    STATE.progress[key] = stats;
+
+                    // Ważenie problemów: problemy z większą ilością błędów są częściej losowane
+                    // Dodajemy problem do puli tyle razy, ile wynosi jego 'difficultyScore' + 1 (podstawowa szansa)
+                    for (let i = 0; i < (stats.difficulty + 1); i++) {
+                        problems.push({ a, b, difficultyScore });
+                    }
+                }
+            }
+
+            // Losowanie problemu z ważonej puli
+            const selectedProblem = problems[Math.floor(Math.random() * problems.length)];
+            
+            if (selectedProblem) {
+                STATE.currentProblem.a = selectedProblem.a;
+                STATE.currentProblem.b = selectedProblem.b;
+                STATE.currentProblem.result = selectedProblem.a * selectedProblem.b;
+            } else {
+                // Fallback dla pustej puli (np. na samym początku)
+                STATE.currentProblem.a = Math.floor(Math.random() * MAX_FACTOR) + 1;
+                STATE.currentProblem.b = Math.floor(Math.random() * MAX_FACTOR) + 1;
+                STATE.currentProblem.result = STATE.currentProblem.a * STATE.currentProblem.b;
+            }
+            
+            // Oczyszczenie wiadomości zwrotnej
+            STATE.feedbackMessage = '';
+            renderApp();
+            
+            // Używamy clearInput po renderowaniu, aby mieć pewność, że element istnieje
+            clearInput(); 
+        }
+
+        /**
+         * Czyści pole odpowiedzi po wygenerowaniu nowego zadania.
+         * Wymaga, aby pole 'answerInput' istniało w DOM.
+         */
+        function clearInput() {
+            const input = document.getElementById('answerInput');
+            if (input) {
+                input.value = '';
+            }
+        }
+
+
+        /**
+         * Renderuje wizualizację grupowania (kropki) dla aktualnego problemu.
+         */
+        function renderVisualization() {
+            const container = document.getElementById('visualizationContainer');
+            if (!container) return; 
+
+            container.innerHTML = ''; // Wyczyść poprzednią wizualizację
+
+            const { a, b } = STATE.currentProblem;
+            
+            // Tylko dla małych liczb, aby nie przeładować ekranu
+            if (a > 6 || b > 6) {
+                container.innerHTML = `<p class="text-sm text-gray-500 mt-2">Dla większych liczb skup się na rachunku!</p>`;
+                return;
+            }
+
+            const grid = document.createElement('div');
+            grid.className = 'grid p-4 gap-2 bg-yellow-50 rounded-xl shadow-inner';
+            grid.style.gridTemplateColumns = `repeat(${b}, minmax(0, 1fr))`;
+
+            // Stwórz a * b kropek (wizualizacja a grup po b)
+            for (let i = 0; i < a * b; i++) {
+                const dot = document.createElement('div');
+                dot.className = 'w-4 h-4 rounded-full shadow-md transition-transform duration-100 ease-in-out hover:scale-110';
+                dot.style.backgroundColor = '#4ECDC4'; // Kolor wibracyjny
+                grid.appendChild(dot);
+            }
+
+            container.appendChild(grid);
+        }
+
+        /**
+         * Obsługuje wysłanie odpowiedzi.
+         */
+        function checkAnswer() {
+            const input = document.getElementById('answerInput');
+            const userAnswer = parseInt(input.value.trim());
+            
+            if (isNaN(userAnswer)) {
+                STATE.feedbackMessage = "Wprowadź liczbę!";
+                renderApp();
+                return;
+            }
+            
+            const { a, b, result } = STATE.currentProblem;
+            const key = `${a}x${b}`;
+
+            // Inicjalizacja statystyk dla klucza, jeśli nie istnieją
+            if (!STATE.progress[key]) {
+                STATE.progress[key] = { correct: 0, attempts: 0, difficulty: MIN_DIFFICULTY };
+            }
+
+            STATE.progress[key].attempts += 1;
+            
+            if (userAnswer === result) {
+                STATE.progress[key].correct += 1;
+                STATE.totalScore += 1;
+                STATE.streak += 1;
+                STATE.feedbackMessage = `Brawo! Poprawna odpowiedź: ${result}. Zdobywasz punkt!`;
+                
+                // Zmniejszenie trudności (łatwiej będzie losowane)
+                if (STATE.progress[key].difficulty > MIN_DIFFICULTY) {
+                    STATE.progress[key].difficulty -= 1;
+                }
+
+                // Generowanie nowego zadania po krótkim opóźnieniu
+                setTimeout(() => {
+                    generateNewProblem();
+                    saveProgress();
+                }, 1000); 
+
+            } else {
+                STATE.streak = 0;
+                STATE.feedbackMessage = `Źle. Spróbuj jeszcze raz. To działanie to ${a} razy ${b}.`;
+                
+                // Zwiększenie trudności (częściej będzie losowane)
+                if (STATE.progress[key].difficulty < MAX_DIFFICULTY) {
+                    STATE.progress[key].difficulty += 2; // Duży skok, aby wymusić powtórkę
+                }
+                
+                // Zapis błędu, ale pozostajemy przy tym samym problemie
+                saveProgress(); 
+                clearInput(); // Czyścimy input po błędnej odpowiedzi
+            }
+            
+            renderApp();
+        }
+
+        // --- RENDEROWANIE UI ---
+
+        function renderApp() {
+            renderHeader();
+            renderMainContent();
+            if (!STATE.parentView) {
+                renderVisualization();
+            } else {
+                renderParentDashboard();
+            }
+        }
+
+        function renderHeader() {
+            const header = document.getElementById('appHeader');
+            header.innerHTML = `
+                <div class="flex justify-between items-center p-4 shadow-md" style="background-color: #45B7D1; color: white;">
+                    <h1 class="text-xl font-bold">Mali Mistrzowie 🏆</h1>
+                    <div class="flex items-center space-x-4">
+                        <span class="text-sm">ID: ${userId ? userId.substring(0, 8) + '...' : 'Ładowanie...'}</span>
+                        <button id="toggleViewBtn" class="bg-white text-gray-800 p-2 rounded-full shadow-lg transition-transform hover:scale-105">
+                            <i class="fas ${STATE.parentView ? 'fa-book-open' : 'fa-chart-bar'}"></i>
+                        </button>
+                    </div>
+                </div>
+                <div class="flex justify-around bg-gray-100 p-2 text-sm text-gray-700">
+                    <span class="font-semibold flex items-center"><i class="fas fa-star text-yellow-500 mr-1"></i> Punkty: ${STATE.totalScore}</span>
+                    <span class="font-semibold flex items-center"><i class="fas fa-fire text-red-500 mr-1"></i> Seria: ${STATE.streak}</span>
+                </div>
+            `;
+            document.getElementById('toggleViewBtn').onclick = toggleView;
+        }
+
+        function renderMainContent() {
+            const content = document.getElementById('appContent');
+            content.innerHTML = '';
+            
+            if (STATE.parentView) {
+                // Widok rodzica renderowany jest w osobnej funkcji
+                renderParentDashboard();
+                return;
+            }
+
+            // Widok Dziecka (Trening)
+            content.className = 'p-6 space-y-6 flex flex-col items-center';
+            content.innerHTML = `
+                <div class="w-full max-w-md bg-white p-8 rounded-xl shadow-2xl text-center border-b-4 border-l-4" style="border-color: #4ECDC4;">
+                    <p class="text-lg text-gray-600 mb-2">Jaki jest wynik?</p>
+                    <div class="text-7xl font-extrabold mb-6" style="color: #45B7D1;">
+                        ${STATE.currentProblem.a} <span class="text-5xl">&times;</span> ${STATE.currentProblem.b}
+                    </div>
+                    <div id="visualizationContainer" class="min-h-[100px] flex justify-center items-center flex-wrap">
+                        <!-- Wizualizacja będzie renderowana przez JS -->
+                    </div>
+                    <form id="answerForm" class="flex justify-center mt-6 space-x-2">
+                        <input type="number" id="answerInput" placeholder="Wpisz odpowiedź" class="p-3 border-2 border-gray-300 rounded-lg w-full max-w-[200px] text-center text-xl focus:border-[#45B7D1] outline-none transition" inputmode="numeric">
+                        <button type="submit" class="p-3 bg-green-500 text-white rounded-lg font-bold shadow-md hover:bg-green-600 transition-colors">
+                            <i class="fas fa-check"></i>
+                        </button>
+                    </form>
+                    <p id="feedbackMessage" class="mt-4 text-md font-semibold ${STATE.feedbackMessage.includes('Brawo') ? 'text-green-600' : 'text-red-500'}">
+                        ${STATE.feedbackMessage}
+                    </p>
+                    <p class="mt-2 text-xs text-gray-400">Poziom trudności tego zadania (AI): ${STATE.progress[`${STATE.currentProblem.a}x${STATE.currentProblem.b}`]?.difficulty || MIN_DIFFICULTY}/${MAX_DIFFICULTY}</p>
+                </div>
+            `;
+            document.getElementById('answerForm').onsubmit = (e) => {
+                e.preventDefault();
+                checkAnswer();
+            };
+        }
+
+        function renderParentDashboard() {
+            const content = document.getElementById('appContent');
+            content.className = 'p-6 space-y-6';
+            content.innerHTML = `
+                <div class="bg-white p-6 rounded-xl shadow-2xl">
+                    <h2 class="text-2xl font-bold mb-4" style="color: #45B7D1;">Raport Postępów (dla Nauczyciela/Rodzica)</h2>
+                    <p class="mb-4 text-sm text-gray-600">Poniżej znajduje się mapa opanowania tabliczki mnożenia (1-10) przez ucznia.</p>
+                    <div id="progressGrid" class="grid grid-cols-11 gap-1 border border-gray-200 p-2 rounded-lg">
+                        <!-- Nagłówki osi X -->
+                        <div class="text-center font-bold text-gray-500">x</div>
+                        ${Array.from({ length: MAX_FACTOR }, (_, i) => `<div class="text-center font-bold text-gray-700">${i + 1}</div>`).join('')}
+
+                        <!-- Komórki wyników -->
+                        ${Array.from({ length: MAX_FACTOR }, (_, aIndex) => {
+                            const a = aIndex + 1;
+                            let row = `<div class="text-center font-bold text-gray-700 p-1">${a}</div>`; // Nagłówek osi Y
+                            for (let bIndex = 0; bIndex < MAX_FACTOR; bIndex++) {
+                                const b = bIndex + 1;
+                                const key = `${a}x${b}`;
+                                const stats = STATE.progress[key] || { correct: 0, attempts: 0 };
+                                
+                                let colorClass = 'bg-gray-200'; // Brak danych
+                                let tooltip = 'Brak danych';
+                                
+                                if (stats.attempts > 0) {
+                                    const percentage = (stats.correct / stats.attempts) * 100;
+                                    tooltip = `${a}x${b} = ${a * b}. Poprawność: ${stats.correct}/${stats.attempts} (${percentage.toFixed(0)}%)`;
+
+                                    if (percentage >= 90) {
+                                        colorClass = 'bg-green-500'; // Opanowane
+                                    } else if (percentage >= 60) {
+                                        colorClass = 'bg-yellow-500'; // W trakcie
+                                    } else {
+                                        colorClass = 'bg-red-500'; // Problem
+                                    }
+                                }
+                                
+                                row += `<div class="w-full h-8 flex items-center justify-center text-white text-xs rounded-sm ${colorClass} transition-all hover:scale-110 hover:z-10 relative group cursor-pointer">
+                                            ${a * b}
+                                            <span class="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 px-3 py-1 bg-gray-800 text-white text-xs rounded-lg opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap">${tooltip}</span>
+                                        </div>`;
+                            }
+                            return row;
+                        }).join('')}
+                    </div>
+                    <div class="mt-6">
+                        <h3 class="text-lg font-semibold mb-2" style="color: #F7B801;">Legenda Trudności (wg. AI Regułowego):</h3>
+                        <div class="flex flex-wrap gap-4 text-sm">
+                            <span class="flex items-center"><span class="w-4 h-4 rounded-full bg-green-500 mr-2"></span> Opanowane ($\geq 90\%$ poprawności)</span>
+                            <span class="flex items-center"><span class="w-4 h-4 rounded-full bg-yellow-500 mr-2"></span> Wymaga powtórki ($60-89\%$ poprawności)</span>
+                            <span class="flex items-center"><span class="w-4 h-4 rounded-full bg-red-500 mr-2"></span> Problematyczne ( $< 60\%$ poprawności)</span>
+                            <span class="flex items-center"><span class="w-4 h-4 rounded-full bg-gray-200 mr-2"></span> Nieprzetestowane</span>
+                        </div>
+                    </div>
+                    <div class="mt-6 p-4 bg-gray-50 rounded-lg text-sm">
+                         <p>Aktualne ID użytkownika/ucznia (do udostępniania postępu):</p>
+                         <code class="font-mono bg-gray-200 p-1 rounded break-all">${userId || 'Ładowanie...'}</code>
+                    </div>
+                </div>
+            `;
+        }
+
+        function toggleView() {
+            STATE.parentView = !STATE.parentView;
+            renderApp();
+        }
+
+        // Inicjalizacja
+        window.onload = initializeFirebase;
+    </script>
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f0f4f8;
+        }
+        .flow-card {
+            background-color: #ffffff;
+            border: 2px solid #45B7D1;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        /* Custom scrollbar style for subtle look */
+        ::-webkit-scrollbar {
+            width: 8px;
+        }
+        ::-webkit-scrollbar-thumb {
+            background-color: #45B7D1;
+            border-radius: 4px;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="appHeader" class="sticky top-0 z-10">
+        <!-- Nagłówek i statystyki -->
+    </div>
+
+    <div id="appContent">
+        <!-- Główna treść (Trening lub Raport) -->
+        <div class="p-8 text-center text-gray-500">
+            <i class="fas fa-spinner fa-spin text-4xl" style="color: #45B7D1;"></i>
+            <p class="mt-4">Ładowanie danych ucznia...</p>
+        </div>
+    </div>
+    
+</body>
+</html>
