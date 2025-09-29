@@ -10,17 +10,16 @@
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
     <!-- Font Awesome for simple icons -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
-    <!-- PWA Manifest -->
+    <!-- PWA Manifest (załóżmy, że plik manifest.json jest dostępny) -->
     <link rel="manifest" href="manifest.json">
     <!-- Firebase SDKs -->
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, doc, setDoc, getDoc, updateDoc, collection, query, onSnapshot, runTransaction, getDocs } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getFirestore, doc, setDoc, getDoc, onSnapshot, runTransaction, collection, getDocs, query } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
         import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         // Konfiguracja i Inicjalizacja Firebase (TERAZ Z RĘCZNIE WPROWADZONYMI KLUCZAMI)
-        // Używamy statycznego ID, bo to zewnetrzny hosting, który nie dostarcza __app_id
         const appId = 'ali-mistrzowie-mnozenia'; 
         
         // === WPROWADZONA KONFIGURACJA Z KONSOLI FIREBASE ===
@@ -33,7 +32,6 @@
             appId: "1:69323239967:web:e8b60481b8adb8e7205b2a",
             measurementId: "G-0PPRPMMEPC"
         };
-        // Token początkowy jest pomijany, bo logujemy anonimowo:
         const initialAuthToken = null; 
 
         let app, db, auth;
@@ -42,21 +40,25 @@
         let initialProblemGenerated = false;
 
         const STATE = {
-            progress: {}, // Przechowuje statystyki dla każdego działania (np. "3x4": {correct: 5, attempts: 6, difficulty: 1})
+            progress: {},
             currentProblem: { a: 0, b: 0, result: 0 },
             totalScore: 0,
             streak: 0,
             parentView: false,
+            teacherView: false, // NOWY STAN
             feedbackMessage: '',
-            isSaving: false
+            isSaving: false,
+            roster: [], // Lista uczniów do widoku nauczyciela
+            currentStudentId: null, // Aktualnie przeglądany uczeń
+            currentStudentName: 'Ja'
         };
 
         const MAX_FACTOR = 10;
         const MIN_DIFFICULTY = 1;
         const MAX_DIFFICULTY = 10;
         const PROGRESS_COLLECTION = 'learning_progress';
-        
-        // Ustaw poziom logowania (dla debugowania)
+        const ROSTER_COLLECTION = 'class_roster'; // Nowa kolekcja publiczna
+
         setLogLevel('Debug');
 
         async function initializeFirebase() {
@@ -65,7 +67,6 @@
                 auth = getAuth(app);
                 db = getFirestore(app);
 
-                // Autentykacja
                 onAuthStateChanged(auth, async (user) => {
                     if (user) {
                         userId = user.uid;
@@ -79,30 +80,67 @@
                             userId = auth.currentUser?.uid || crypto.randomUUID();
                         } catch (error) {
                             console.error("Błąd autentykacji:", error);
-                            userId = crypto.randomUUID(); // Fallback
+                            userId = crypto.randomUUID();
                         }
                     }
                     isAuthReady = true;
+                    STATE.currentStudentId = userId; // Ustaw domyślnie na bieżącego użytkownika
                     console.log("Gotowy do pracy. User ID:", userId);
-                    loadProgress();
+                    await registerUser(userId); // Rejestracja/Sprawdzenie imienia
+                    loadProgress(userId); // Ładowanie bieżącego użytkownika
                 });
 
             } catch (error) {
                 console.error("Krytyczny błąd inicjalizacji Firebase:", error);
-                isAuthReady = true; // Zezwól na kontynuację bez ładowania postępów
+                isAuthReady = true;
+            }
+        }
+        
+        // --- FUNKCJE DANYCH FIREBASE ---
+
+        /**
+         * Zapisuje/sprawdza imię w publicznej liście klasy.
+         */
+        async function registerUser(uid) {
+            const rosterRef = doc(db, 'artifacts', appId, 'public', 'data', ROSTER_COLLECTION, uid);
+            const docSnap = await getDoc(rosterRef);
+
+            if (!docSnap.exists()) {
+                // Nowy użytkownik - prośba o imię
+                renderNameInput();
+                return new Promise((resolve) => {
+                    document.getElementById('saveNameBtn').onclick = async () => {
+                        const name = document.getElementById('userNameInput').value.trim();
+                        if (name) {
+                            // Ten setDoc wymaga uprawnienia 'write' w regule ROSTER_COLLECTION.
+                            await setDoc(rosterRef, { name: name, uid: uid, score: 0, lastActive: new Date().toISOString() });
+                            STATE.currentStudentName = name;
+                            renderApp(); // Wróć do głównego widoku
+                            resolve();
+                        }
+                    };
+                });
+            } else {
+                STATE.currentStudentName = docSnap.data().name;
             }
         }
 
-        function getProgressDocRef() {
-            if (!userId || !db) return null;
-            // Ścieżka danych jest zgodna z regułami Firestore: /artifacts/{appId}/users/{userId}/learning_progress/data
-            return doc(db, 'artifacts', appId, 'users', userId, PROGRESS_COLLECTION, 'data');
+        function getProgressDocRef(uid) {
+            const id = uid || STATE.currentStudentId;
+            if (!id || !db) return null;
+            // Prywatna ścieżka danych: /artifacts/{appId}/users/{userId}/learning_progress/data
+            return doc(db, 'artifacts', appId, 'users', id, PROGRESS_COLLECTION, 'data');
         }
 
-        function loadProgress() {
-            if (!isAuthReady || !db || !userId) return;
+        function getClassRosterRef() {
+            // Ta kolekcja wymaga uprawnienia 'read' w regule ROSTER_COLLECTION dla anonimowych użytkowników.
+            return collection(db, 'artifacts', appId, 'public', 'data', ROSTER_COLLECTION);
+        }
 
-            const docRef = getProgressDocRef();
+        function loadProgress(uid) {
+            if (!isAuthReady || !db || !uid) return;
+
+            const docRef = getProgressDocRef(uid);
             if (!docRef) return;
 
             // Używamy onSnapshot dla aktualizacji w czasie rzeczywistym
@@ -112,33 +150,23 @@
                     STATE.progress = data.progress || {};
                     STATE.totalScore = data.totalScore || 0;
                     STATE.streak = data.streak || 0;
-                    console.log("Postęp wczytany/zaktualizowany.");
-                    
-                    if (!initialProblemGenerated) {
-                        generateNewProblem();
-                        initialProblemGenerated = true;
-                    }
-
-                    renderApp();
-                    
                 } else {
-                    console.log("Brak postępu. Inicjalizacja nowego.");
-                    if (!initialProblemGenerated) {
-                        generateNewProblem();
-                        initialProblemGenerated = true;
-                    }
-                    renderApp();
+                    STATE.progress = {};
+                    STATE.totalScore = 0;
+                    STATE.streak = 0;
                 }
+                
+                if (uid === userId && !initialProblemGenerated) {
+                    generateNewProblem();
+                    initialProblemGenerated = true;
+                }
+                renderApp();
+
             }, (error) => {
                 console.error("Błąd ładowania postępu w czasie rzeczywistym:", error);
             });
         }
         
-        // --- LOGIKA ADAPTACYJNA (Regułowa) ---
-        
-        /**
-         * Zapisuje postęp do Firestore. Używa runTransaction dla bezpieczeństwa danych.
-         */
         async function saveProgress() {
             if (!isAuthReady || !db || STATE.isSaving) {
                 console.log("Nie można zapisać, autoryzacja niegotowa lub trwa zapis.");
@@ -148,7 +176,7 @@
 
             try {
                 await runTransaction(db, async (transaction) => {
-                    const docRef = getProgressDocRef();
+                    const docRef = getProgressDocRef(userId);
                     
                     const newProgress = {
                         progress: STATE.progress,
@@ -158,8 +186,16 @@
                     };
 
                     transaction.set(docRef, newProgress);
+
+                    // Aktualizacja score i lastActive w publicznym rosterze
+                    // Ta operacja wymaga uprawnienia 'write' (update) w regule ROSTER_COLLECTION.
+                    const rosterRef = doc(db, 'artifacts', appId, 'public', 'data', ROSTER_COLLECTION, userId);
+                    transaction.update(rosterRef, { 
+                        score: STATE.totalScore,
+                        lastActive: new Date().toISOString()
+                    });
                 });
-                console.log("Postęp zapisany pomyślnie.");
+                console.log("Postęp i roster zapisane pomyślnie.");
             } catch (error) {
                 console.error("Błąd transakcji zapisu postępu:", error);
             } finally {
@@ -167,9 +203,9 @@
             }
         }
 
-        /**
-         * Dynamicznie dobiera następne zadanie w oparciu o reguły (nie ML).
-         */
+
+        // --- LOGIKA ADAPTACYJNA I ODPOWIEDZI (bez zmian) ---
+
         function generateNewProblem() {
             const problems = [];
             for (let a = 1; a <= MAX_FACTOR; a++) {
@@ -177,26 +213,21 @@
                     const key = `${a}x${b}`;
                     const stats = STATE.progress[key] || { correct: 0, attempts: 0, difficulty: MIN_DIFFICULTY };
                     
-                    // Wskaźnik "trudności" na podstawie statystyk
                     let difficultyScore = 0;
                     if (stats.attempts > 0) {
                         const errorRate = 1 - (stats.correct / stats.attempts);
-                        difficultyScore = errorRate * 10; // 10 dla 100% błędów, 0 dla 0%
+                        difficultyScore = errorRate * 10;
                     }
 
-                    // Ustawienie poziomu trudności dla problemu w State
                     stats.difficulty = Math.ceil(difficultyScore) || MIN_DIFFICULTY; 
                     STATE.progress[key] = stats;
 
-                    // Ważenie problemów: problemy z większą ilością błędów są częściej losowane
-                    // Dodajemy problem do puli tyle razy, ile wynosi jego 'difficultyScore' + 1 (podstawowa szansa)
                     for (let i = 0; i < (stats.difficulty + 1); i++) {
                         problems.push({ a, b, difficultyScore });
                     }
                 }
             }
 
-            // Losowanie problemu z ważonej puli
             const selectedProblem = problems[Math.floor(Math.random() * problems.length)];
             
             if (selectedProblem) {
@@ -204,67 +235,17 @@
                 STATE.currentProblem.b = selectedProblem.b;
                 STATE.currentProblem.result = selectedProblem.a * selectedProblem.b;
             } else {
-                // Fallback dla pustej puli (np. na samym początku)
                 STATE.currentProblem.a = Math.floor(Math.random() * MAX_FACTOR) + 1;
                 STATE.currentProblem.b = Math.floor(Math.random() * MAX_FACTOR) + 1;
                 STATE.currentProblem.result = STATE.currentProblem.a * STATE.currentProblem.b;
             }
             
-            // Oczyszczenie wiadomości zwrotnej
             STATE.feedbackMessage = '';
             renderApp();
             
-            // Używamy clearInput po renderowaniu, aby mieć pewność, że element istnieje
             clearInput(); 
         }
 
-        /**
-         * Czyści pole odpowiedzi po wygenerowaniu nowego zadania.
-         * Wymaga, aby pole 'answerInput' istniało w DOM.
-         */
-        function clearInput() {
-            const input = document.getElementById('answerInput');
-            if (input) {
-                input.value = '';
-            }
-        }
-
-
-        /**
-         * Renderuje wizualizację grupowania (kropki) dla aktualnego problemu.
-         */
-        function renderVisualization() {
-            const container = document.getElementById('visualizationContainer');
-            if (!container) return; 
-
-            container.innerHTML = ''; // Wyczyść poprzednią wizualizację
-
-            const { a, b } = STATE.currentProblem;
-            
-            // Tylko dla małych liczb, aby nie przeładować ekranu
-            if (a > 6 || b > 6) {
-                container.innerHTML = `<p class="text-sm text-gray-500 mt-2">Dla większych liczb skup się na rachunku!</p>`;
-                return;
-            }
-
-            const grid = document.createElement('div');
-            grid.className = 'grid p-4 gap-2 bg-yellow-50 rounded-xl shadow-inner';
-            grid.style.gridTemplateColumns = `repeat(${b}, minmax(0, 1fr))`;
-
-            // Stwórz a * b kropek (wizualizacja a grup po b)
-            for (let i = 0; i < a * b; i++) {
-                const dot = document.createElement('div');
-                dot.className = 'w-4 h-4 rounded-full shadow-md transition-transform duration-100 ease-in-out hover:scale-110';
-                dot.style.backgroundColor = '#4ECDC4'; // Kolor wibracyjny
-                grid.appendChild(dot);
-            }
-
-            container.appendChild(grid);
-        }
-
-        /**
-         * Obsługuje wysłanie odpowiedzi.
-         */
         function checkAnswer() {
             const input = document.getElementById('answerInput');
             const userAnswer = parseInt(input.value.trim());
@@ -278,7 +259,6 @@
             const { a, b, result } = STATE.currentProblem;
             const key = `${a}x${b}`;
 
-            // Inicjalizacja statystyk dla klucza, jeśli nie istnieją
             if (!STATE.progress[key]) {
                 STATE.progress[key] = { correct: 0, attempts: 0, difficulty: MIN_DIFFICULTY };
             }
@@ -291,12 +271,10 @@
                 STATE.streak += 1;
                 STATE.feedbackMessage = `Brawo! Poprawna odpowiedź: ${result}. Zdobywasz punkt!`;
                 
-                // Zmniejszenie trudności (łatwiej będzie losowane)
                 if (STATE.progress[key].difficulty > MIN_DIFFICULTY) {
                     STATE.progress[key].difficulty -= 1;
                 }
 
-                // Generowanie nowego zadania po krótkim opóźnieniu
                 setTimeout(() => {
                     generateNewProblem();
                     saveProgress();
@@ -306,28 +284,39 @@
                 STATE.streak = 0;
                 STATE.feedbackMessage = `Źle. Spróbuj jeszcze raz. To działanie to ${a} razy ${b}.`;
                 
-                // Zwiększenie trudności (częściej będzie losowane)
                 if (STATE.progress[key].difficulty < MAX_DIFFICULTY) {
-                    STATE.progress[key].difficulty += 2; // Duży skok, aby wymusić powtórkę
+                    STATE.progress[key].difficulty += 2;
                 }
                 
-                // Zapis błędu, ale pozostajemy przy tym samym problemie
                 saveProgress(); 
-                clearInput(); // Czyścimy input po błędnej odpowiedzi
+                clearInput();
             }
             
             renderApp();
         }
 
+        function clearInput() {
+            const input = document.getElementById('answerInput');
+            if (input) {
+                input.value = '';
+            }
+        }
+
         // --- RENDEROWANIE UI ---
 
         function renderApp() {
+            if (!STATE.currentStudentName || STATE.currentStudentName === 'Ładowanie...') {
+                return; // Czekamy na input imienia
+            }
             renderHeader();
             renderMainContent();
-            if (!STATE.parentView) {
+            
+            if (!STATE.parentView && !STATE.teacherView) {
                 renderVisualization();
-            } else {
+            } else if (STATE.parentView) {
                 renderParentDashboard();
+            } else if (STATE.teacherView) {
+                renderTeacherDashboard();
             }
         }
 
@@ -335,10 +324,13 @@
             const header = document.getElementById('appHeader');
             header.innerHTML = `
                 <div class="flex justify-between items-center p-4 shadow-md" style="background-color: #45B7D1; color: white;">
-                    <h1 class="text-xl font-bold">Mali Mistrzowie 🏆</h1>
+                    <h1 class="text-xl font-bold">Mali Mistrzowie 🏆 (${STATE.currentStudentName})</h1>
                     <div class="flex items-center space-x-4">
                         <span class="text-sm">ID: ${userId ? userId.substring(0, 8) + '...' : 'Ładowanie...'}</span>
-                        <button id="toggleViewBtn" class="bg-white text-gray-800 p-2 rounded-full shadow-lg transition-transform hover:scale-105">
+                        <button id="toggleTeacherViewBtn" title="Przełącz na Panel Nauczyciela" class="bg-white text-gray-800 p-2 rounded-full shadow-lg transition-transform hover:scale-105">
+                            <i class="fas fa-graduation-cap"></i>
+                        </button>
+                        <button id="toggleViewBtn" title="Przełącz na Raport Ucznia" class="bg-white text-gray-800 p-2 rounded-full shadow-lg transition-transform hover:scale-105">
                             <i class="fas ${STATE.parentView ? 'fa-book-open' : 'fa-chart-bar'}"></i>
                         </button>
                     </div>
@@ -348,16 +340,16 @@
                     <span class="font-semibold flex items-center"><i class="fas fa-fire text-red-500 mr-1"></i> Seria: ${STATE.streak}</span>
                 </div>
             `;
-            document.getElementById('toggleViewBtn').onclick = toggleView;
+            document.getElementById('toggleViewBtn').onclick = toggleParentView;
+            document.getElementById('toggleTeacherViewBtn').onclick = toggleTeacherView;
         }
 
         function renderMainContent() {
             const content = document.getElementById('appContent');
             content.innerHTML = '';
             
-            if (STATE.parentView) {
-                // Widok rodzica renderowany jest w osobnej funkcji
-                renderParentDashboard();
+            if (STATE.parentView || STATE.teacherView) {
+                // Dashboardy renderowane są w osobnych funkcjach
                 return;
             }
 
@@ -390,13 +382,48 @@
             };
         }
 
+        function renderVisualization() {
+            const container = document.getElementById('visualizationContainer');
+            if (!container) return; 
+
+            container.innerHTML = '';
+
+            const { a, b } = STATE.currentProblem;
+            
+            if (a > 6 || b > 6) {
+                container.innerHTML = `<p class="text-sm text-gray-500 mt-2">Dla większych liczb skup się na rachunku!</p>`;
+                return;
+            }
+
+            const grid = document.createElement('div');
+            grid.className = 'grid p-4 gap-2 bg-yellow-50 rounded-xl shadow-inner';
+            grid.style.gridTemplateColumns = `repeat(${b}, minmax(0, 1fr))`;
+
+            for (let i = 0; i < a * b; i++) {
+                const dot = document.createElement('div');
+                dot.className = 'w-4 h-4 rounded-full shadow-md transition-transform duration-100 ease-in-out hover:scale-110';
+                dot.style.backgroundColor = '#4ECDC4';
+                grid.appendChild(dot);
+            }
+
+            container.appendChild(grid);
+        }
+
         function renderParentDashboard() {
             const content = document.getElementById('appContent');
             content.className = 'p-6 space-y-6';
+            
+            let currentStudentInfo = STATE.currentStudentName;
+            if(STATE.teacherView && STATE.currentStudentId !== userId) {
+                 currentStudentInfo = `UCZEŃ: ${STATE.currentStudentName}`;
+            } else if(STATE.teacherView) {
+                 currentStudentInfo = `WŁASNY RAPORT (w trybie nauczyciela)`;
+            }
+
             content.innerHTML = `
                 <div class="bg-white p-6 rounded-xl shadow-2xl">
-                    <h2 class="text-2xl font-bold mb-4" style="color: #45B7D1;">Raport Postępów (dla Nauczyciela/Rodzica)</h2>
-                    <p class="mb-4 text-sm text-gray-600">Poniżej znajduje się mapa opanowania tabliczki mnożenia (1-10) przez ucznia.</p>
+                    <h2 class="text-2xl font-bold mb-4" style="color: #45B7D1;">Raport Postępów (${currentStudentInfo})</h2>
+                    <p class="mb-4 text-sm text-gray-600">Poniżej znajduje się mapa opanowania tabliczki mnożenia (1-10).</p>
                     <div id="progressGrid" class="grid grid-cols-11 gap-1 border border-gray-200 p-2 rounded-lg">
                         <!-- Nagłówki osi X -->
                         <div class="text-center font-bold text-gray-500">x</div>
@@ -411,7 +438,7 @@
                                 const key = `${a}x${b}`;
                                 const stats = STATE.progress[key] || { correct: 0, attempts: 0 };
                                 
-                                let colorClass = 'bg-gray-200'; // Brak danych
+                                let colorClass = 'bg-gray-200';
                                 let tooltip = 'Brak danych';
                                 
                                 if (stats.attempts > 0) {
@@ -419,11 +446,11 @@
                                     tooltip = `${a}x${b} = ${a * b}. Poprawność: ${stats.correct}/${stats.attempts} (${percentage.toFixed(0)}%)`;
 
                                     if (percentage >= 90) {
-                                        colorClass = 'bg-green-500'; // Opanowane
+                                        colorClass = 'bg-green-500';
                                     } else if (percentage >= 60) {
-                                        colorClass = 'bg-yellow-500'; // W trakcie
+                                        colorClass = 'bg-yellow-500';
                                     } else {
-                                        colorClass = 'bg-red-500'; // Problem
+                                        colorClass = 'bg-red-500';
                                     }
                                 }
                                 
@@ -436,7 +463,7 @@
                         }).join('')}
                     </div>
                     <div class="mt-6">
-                        <h3 class="text-lg font-semibold mb-2" style="color: #F7B801;">Legenda Trudności (wg. AI Regułowego):</h3>
+                        <h3 class="text-lg font-semibold mb-2" style="color: #F7B801;">Legenda Trudności:</h3>
                         <div class="flex flex-wrap gap-4 text-sm">
                             <span class="flex items-center"><span class="w-4 h-4 rounded-full bg-green-500 mr-2"></span> Opanowane ($\geq 90\%$ poprawności)</span>
                             <span class="flex items-center"><span class="w-4 h-4 rounded-full bg-yellow-500 mr-2"></span> Wymaga powtórki ($60-89\%$ poprawności)</span>
@@ -445,16 +472,154 @@
                         </div>
                     </div>
                     <div class="mt-6 p-4 bg-gray-50 rounded-lg text-sm">
-                         <p>Aktualne ID użytkownika/ucznia (do udostępniania postępu):</p>
-                         <code class="font-mono bg-gray-200 p-1 rounded break-all">${userId || 'Ładowanie...'}</code>
+                         <p>ID użytkownika: <code class="font-mono bg-gray-200 p-1 rounded break-all">${STATE.currentStudentId || 'Ładowanie...'}</code></p>
                     </div>
                 </div>
             `;
         }
+        
+        // --- NOWY PANEL DLA NAUCZYCIELA ---
 
-        function toggleView() {
+        async function renderTeacherDashboard() {
+            const content = document.getElementById('appContent');
+            content.className = 'p-6 space-y-6';
+
+            // Ładowanie listy uczniów
+            content.innerHTML = `
+                <div class="bg-white p-6 rounded-xl shadow-2xl w-full max-w-2xl mx-auto">
+                    <h2 class="text-2xl font-bold mb-4" style="color: #45B7D1;">Panel Nauczyciela: Lista Uczniów</h2>
+                    <p class="mb-4 text-sm text-gray-600">Kliknij na imię ucznia, aby zobaczyć szczegółowy raport postępów.</p>
+                    <div id="rosterList" class="space-y-3">
+                        <div class="text-center p-8 text-gray-400"><i class="fas fa-spinner fa-spin mr-2"></i>Ładowanie listy uczniów...</div>
+                    </div>
+                </div>
+                <div id="studentReportContainer">
+                    <!-- Tutaj załaduje się raport ucznia (renderParentDashboard) -->
+                </div>
+            `;
+
+            const rosterListDiv = document.getElementById('rosterList');
+            
+            try {
+                // Ta operacja wymaga uprawnienia 'read' w regule ROSTER_COLLECTION.
+                const rosterSnapshot = await getDocs(query(getClassRosterRef()));
+                STATE.roster = rosterSnapshot.docs.map(doc => doc.data()).sort((a, b) => b.score - a.score); // Sortuj po wyniku
+
+                if (STATE.roster.length === 0) {
+                    rosterListDiv.innerHTML = `<div class="text-center p-8 text-gray-400">Brak zarejestrowanych uczniów.</div>`;
+                    return;
+                }
+
+                rosterListDiv.innerHTML = `
+                    <div class="grid grid-cols-3 font-bold text-sm text-gray-700 border-b pb-1">
+                        <div>Imię Ucznia</div>
+                        <div class="text-center">Punkty</div>
+                        <div class="text-center">Ostatnia Aktywność</div>
+                    </div>
+                    ${STATE.roster.map(student => `
+                        <button data-uid="${student.uid}" 
+                                data-name="${student.name}"
+                                class="student-button grid grid-cols-3 items-center p-3 rounded-lg text-left shadow-sm transition-colors hover:bg-indigo-100 ${student.uid === STATE.currentStudentId ? 'bg-indigo-200 font-semibold' : 'bg-white'}">
+                            <div class="text-lg">${student.name} ${student.uid === userId ? '(Ty)' : ''}</div>
+                            <div class="text-center font-bold text-green-600">${student.score}</div>
+                            <div class="text-center text-sm text-gray-500">${timeAgo(student.lastActive)}</div>
+                        </button>
+                    `).join('')}
+                `;
+
+                // Dodanie event listenerów do przycisków
+                document.querySelectorAll('.student-button').forEach(button => {
+                    button.onclick = (e) => {
+                        const uid = e.currentTarget.getAttribute('data-uid');
+                        const name = e.currentTarget.getAttribute('data-name');
+                        switchStudentView(uid, name);
+                    };
+                });
+                
+                // Jeśli jest to pierwszy raz, automatycznie załaduj raport bieżącego użytkownika.
+                if (STATE.currentStudentId === userId) {
+                    // Wywołanie renderParentDashboard bez przeładowania listy uczniów
+                    document.getElementById('studentReportContainer').innerHTML = renderParentDashboard();
+                }
+
+            } catch (error) {
+                // Ta sekcja wykonuje się przy błędzie braku uprawnień (Missing or insufficient permissions)
+                rosterListDiv.innerHTML = `<div class="text-center p-8 text-red-500">
+                    <i class="fas fa-exclamation-triangle mr-2"></i>
+                    Błąd ładowania listy. Sprawdź, czy reguły Firestore zezwalają na odczyt kolekcji 'class_roster'.
+                </div>`;
+                console.error("Błąd ładowania listy uczniów (Brak uprawnień?):", error);
+            }
+        }
+
+        /**
+         * Przełącza wyświetlany raport na innego ucznia i ponownie ładuje dane.
+         */
+        function switchStudentView(uid, name) {
+            STATE.currentStudentId = uid;
+            STATE.currentStudentName = name;
+            // Przeładuj dane postępu dla wybranego UID
+            loadProgress(uid); 
+            
+            // Zmieniamy tylko widok raportu w kontenerze, nie całą stronę.
+            const reportContainer = document.getElementById('studentReportContainer');
+            if (reportContainer) {
+                 reportContainer.innerHTML = renderParentDashboard();
+            }
+            renderTeacherDashboard(); // Odśwież listę, aby podświetlić aktywnego ucznia
+        }
+
+        // --- FUNKCJE POMOCNICZE UI ---
+
+        function toggleParentView() {
             STATE.parentView = !STATE.parentView;
+            STATE.teacherView = false; // Wyłącz widok nauczyciela
+            // Reset do własnego postępu
+            STATE.currentStudentId = userId; 
+            loadProgress(userId); 
             renderApp();
+        }
+
+        async function toggleTeacherView() {
+            STATE.teacherView = !STATE.teacherView;
+            STATE.parentView = false; // Wyłącz widok rodzica
+            
+            // Ustaw domyślnie na bieżącego użytkownika (nauczyciela)
+            STATE.currentStudentId = userId;
+            loadProgress(userId);
+            
+            if (STATE.teacherView) {
+                // Konieczne jest ponowne załadowanie, aby załadować listę uczniów
+                await renderTeacherDashboard();
+            }
+            renderApp();
+        }
+
+        function renderNameInput() {
+            const content = document.getElementById('appContent');
+            content.className = 'p-6 space-y-6 flex flex-col items-center min-h-screen justify-center';
+            content.innerHTML = `
+                <div class="w-full max-w-md bg-white p-8 rounded-xl shadow-2xl text-center border-b-4 border-l-4" style="border-color: #4ECDC4;">
+                    <h2 class="text-2xl font-bold mb-4" style="color: #45B7D1;">Witaj!</h2>
+                    <p class="text-lg text-gray-600 mb-6">Jak masz na imię? (Użyjemy tego do śledzenia Twoich postępów.)</p>
+                    <input type="text" id="userNameInput" placeholder="Twoje imię lub pseudonim" class="p-3 border-2 border-gray-300 rounded-lg w-full max-w-[200px] text-center text-xl focus:border-[#45B7D1] outline-none transition" inputmode="text" maxlength="12">
+                    <button id="saveNameBtn" class="mt-4 p-3 w-full bg-green-500 text-white rounded-lg font-bold shadow-md hover:bg-green-600 transition-colors">
+                        Rozpocznij Trening!
+                    </button>
+                </div>
+            `;
+        }
+        
+        // Konwertuje ISOString na format "X minut temu"
+        function timeAgo(dateString) {
+            const now = new Date();
+            const past = new Date(dateString);
+            const seconds = Math.floor((now - past) / 1000);
+
+            if (seconds < 60) return 'teraz';
+            if (seconds < 3600) return `${Math.floor(seconds / 60)} min. temu`;
+            if (seconds < 86400) return `${Math.floor(seconds / 3600)} godz. temu`;
+            return `${Math.floor(seconds / 86400)} dni temu`;
         }
 
         // Inicjalizacja
@@ -464,19 +629,6 @@
         body {
             font-family: 'Inter', sans-serif;
             background-color: #f0f4f8;
-        }
-        .flow-card {
-            background-color: #ffffff;
-            border: 2px solid #45B7D1;
-            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-        }
-        /* Custom scrollbar style for subtle look */
-        ::-webkit-scrollbar {
-            width: 8px;
-        }
-        ::-webkit-scrollbar-thumb {
-            background-color: #45B7D1;
-            border-radius: 4px;
         }
     </style>
 </head>
