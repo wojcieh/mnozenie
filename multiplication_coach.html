@@ -2,649 +2,343 @@
 <html lang="pl">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Mnożenie dla Małych Mistrzów (5-8 lat)</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Szybkie Mnożenie Mobile</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
-    <!-- Font Awesome for simple icons -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
-    <!-- PWA Manifest (załóżmy, że plik manifest.json jest dostępny) -->
-    <link rel="manifest" href="manifest.json">
-    <!-- Firebase SDKs -->
-    <script type="module">
-        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, doc, setDoc, getDoc, onSnapshot, runTransaction, collection, getDocs, query } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
-        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f8fafc;
+            /* Zapobieganie przewijaniu "bounce" na iOS */
+            overscroll-behavior: none;
+            touch-action: manipulation;
+        }
+        /* Efekt wciśnięcia przycisku */
+        .btn-active:active {
+            transform: scale(0.95);
+            background-color: #cbd5e1;
+        }
+    </style>
+</head>
+<body class="h-[100dvh] flex flex-col overflow-hidden">
 
-        // Konfiguracja i Inicjalizacja Firebase (TERAZ Z RĘCZNIE WPROWADZONYMI KLUCZAMI)
-        const appId = 'ali-mistrzowie-mnozenia'; 
-        
-        // === WPROWADZONA KONFIGURACJA Z KONSOLI FIREBASE ===
-        const firebaseConfig = {
-            apiKey: "AIzaSyAotvq-QkxFnsnCGomWKBf9DLEHeDNU6SI",
-            authDomain: "ali-mistrzowie-mnozenia.firebaseapp.com",
-            projectId: "ali-mistrzowie-mnozenia",
-            storageBucket: "ali-mistrzowie-mnozenia.firebasestorage.app",
-            messagingSenderId: "69323239967",
-            appId: "1:69323239967:web:e8b60481b8adb8e7205b2a",
-            measurementId: "G-0PPRPMMEPC"
-        };
-        const initialAuthToken = null; 
+    <div id="appHeader" class="shrink-0 flex justify-between items-center p-3 bg-white shadow-sm border-b border-gray-200 z-10">
+        <h1 class="text-lg font-bold text-[#45B7D1] leading-tight">Mnożenie <span class="text-xs text-gray-400 block font-normal">Zakres 2-9</span></h1>
+        <div class="flex items-center space-x-3">
+            <div class="bg-gray-100 px-3 py-1 rounded-full">
+                <i class="fas fa-stopwatch text-red-500 mr-1 text-sm"></i>
+                <span id="timerDisplay" class="font-bold text-gray-800 text-lg tabular-nums">60</span><span class="text-xs text-gray-500">s</span>
+            </div>
+            <div class="bg-yellow-50 px-3 py-1 rounded-full border border-yellow-100">
+                <i class="fas fa-star text-yellow-500 mr-1 text-sm"></i>
+                <span id="scoreDisplay" class="font-bold text-gray-800 text-lg tabular-nums">0</span>
+            </div>
+        </div>
+    </div>
 
-        let app, db, auth;
-        let userId = null;
-        let isAuthReady = false;
-        let initialProblemGenerated = false;
+    <div id="appContent" class="flex-grow flex flex-col relative overflow-hidden">
+        <div class="absolute inset-0 flex flex-col items-center justify-center p-6 bg-[#f0f4f8] z-20">
+            <div class="bg-white p-8 rounded-2xl shadow-xl text-center max-w-sm w-full">
+                <div class="w-20 h-20 bg-blue-100 rounded-full flex items-center justify-center mx-auto mb-6 text-[#45B7D1]">
+                    <i class="fas fa-mobile-alt text-4xl"></i>
+                </div>
+                <h2 class="text-2xl font-bold text-gray-800 mb-2">Tryb Mobilny</h2>
+                <p class="text-gray-500 mb-8">Wybieraj wynik z planszy. Masz 60 sekund!</p>
+                <button id="startBtn" class="w-full py-4 bg-green-500 text-white rounded-xl font-bold shadow-lg hover:bg-green-600 active:scale-95 transition-all text-xl">
+                    START
+                </button>
+            </div>
+        </div>
+    </div>
 
-        const STATE = {
+    <script>
+        // === KONFIGURACJA ===
+        const MIN_FACTOR = 2;
+        const MAX_FACTOR = 9;
+        const DIAGNOSIS_TIME_SECONDS = 60;
+
+        // Generowanie unikalnych wyników dla planszy (tylko poprawne iloczyny)
+        const POSSIBLE_RESULTS = new Set();
+        for (let i = MIN_FACTOR; i <= MAX_FACTOR; i++) {
+            for (let j = MIN_FACTOR; j <= MAX_FACTOR; j++) {
+                POSSIBLE_RESULTS.add(i * j);
+            }
+        }
+        // Sortujemy rosnąco do wyświetlenia na siatce
+        const SORTED_RESULTS = Array.from(POSSIBLE_RESULTS).sort((a, b) => a - b);
+
+        let STATE = {
             progress: {},
             currentProblem: { a: 0, b: 0, result: 0 },
             totalScore: 0,
-            streak: 0,
-            parentView: false,
-            teacherView: false, // NOWY STAN
-            feedbackMessage: '',
-            isSaving: false,
-            roster: [], // Lista uczniów do widoku nauczyciela
-            currentStudentId: null, // Aktualnie przeglądany uczeń
-            currentStudentName: 'Ja'
+            timer: null,
+            timeLeft: DIAGNOSIS_TIME_SECONDS,
+            isDiagnosisPhase: true,
+            phaseName: 'Diagnoza',
+            isProcessing: false // Blokada klikania podczas animacji
         };
 
-        const MAX_FACTOR = 10;
-        const MIN_DIFFICULTY = 1;
-        const MAX_DIFFICULTY = 10;
-        const PROGRESS_COLLECTION = 'learning_progress';
-        const ROSTER_COLLECTION = 'class_roster'; // Nowa kolekcja publiczna
-
-        setLogLevel('Debug');
-
-        async function initializeFirebase() {
-            try {
-                app = initializeApp(firebaseConfig);
-                auth = getAuth(app);
-                db = getFirestore(app);
-
-                onAuthStateChanged(auth, async (user) => {
-                    if (user) {
-                        userId = user.uid;
-                    } else {
-                        try {
-                            if (initialAuthToken) {
-                                await signInWithCustomToken(auth, initialAuthToken);
-                            } else {
-                                await signInAnonymously(auth);
-                            }
-                            userId = auth.currentUser?.uid || crypto.randomUUID();
-                        } catch (error) {
-                            console.error("Błąd autentykacji:", error);
-                            userId = crypto.randomUUID();
-                        }
-                    }
-                    isAuthReady = true;
-                    STATE.currentStudentId = userId; // Ustaw domyślnie na bieżącego użytkownika
-                    console.log("Gotowy do pracy. User ID:", userId);
-                    await registerUser(userId); // Rejestracja/Sprawdzenie imienia
-                    loadProgress(userId); // Ładowanie bieżącego użytkownika
-                });
-
-            } catch (error) {
-                console.error("Krytyczny błąd inicjalizacji Firebase:", error);
-                isAuthReady = true;
-            }
-        }
-        
-        // --- FUNKCJE DANYCH FIREBASE ---
-
-        /**
-         * Zapisuje/sprawdza imię w publicznej liście klasy.
-         */
-        async function registerUser(uid) {
-            const rosterRef = doc(db, 'artifacts', appId, 'public', 'data', ROSTER_COLLECTION, uid);
-            const docSnap = await getDoc(rosterRef);
-
-            if (!docSnap.exists()) {
-                // Nowy użytkownik - prośba o imię
-                renderNameInput();
-                return new Promise((resolve) => {
-                    document.getElementById('saveNameBtn').onclick = async () => {
-                        const name = document.getElementById('userNameInput').value.trim();
-                        if (name) {
-                            // Ten setDoc wymaga uprawnienia 'write' w regule ROSTER_COLLECTION.
-                            await setDoc(rosterRef, { name: name, uid: uid, score: 0, lastActive: new Date().toISOString() });
-                            STATE.currentStudentName = name;
-                            renderApp(); // Wróć do głównego widoku
-                            resolve();
-                        }
-                    };
-                });
-            } else {
-                STATE.currentStudentName = docSnap.data().name;
-            }
-        }
-
-        function getProgressDocRef(uid) {
-            const id = uid || STATE.currentStudentId;
-            if (!id || !db) return null;
-            // Prywatna ścieżka danych: /artifacts/{appId}/users/{userId}/learning_progress/data
-            return doc(db, 'artifacts', appId, 'users', id, PROGRESS_COLLECTION, 'data');
-        }
-
-        function getClassRosterRef() {
-            // Ta kolekcja wymaga uprawnienia 'read' w regule ROSTER_COLLECTION dla anonimowych użytkowników.
-            return collection(db, 'artifacts', appId, 'public', 'data', ROSTER_COLLECTION);
-        }
-
-        function loadProgress(uid) {
-            if (!isAuthReady || !db || !uid) return;
-
-            const docRef = getProgressDocRef(uid);
-            if (!docRef) return;
-
-            // Używamy onSnapshot dla aktualizacji w czasie rzeczywistym
-            onSnapshot(docRef, (docSnap) => {
-                if (docSnap.exists()) {
-                    const data = docSnap.data();
-                    STATE.progress = data.progress || {};
-                    STATE.totalScore = data.totalScore || 0;
-                    STATE.streak = data.streak || 0;
-                } else {
-                    STATE.progress = {};
-                    STATE.totalScore = 0;
-                    STATE.streak = 0;
-                }
-                
-                if (uid === userId && !initialProblemGenerated) {
-                    generateNewProblem();
-                    initialProblemGenerated = true;
-                }
-                renderApp();
-
-            }, (error) => {
-                console.error("Błąd ładowania postępu w czasie rzeczywistym:", error);
-            });
-        }
-        
-        async function saveProgress() {
-            if (!isAuthReady || !db || STATE.isSaving) {
-                console.log("Nie można zapisać, autoryzacja niegotowa lub trwa zapis.");
-                return;
-            }
-            STATE.isSaving = true;
-
-            try {
-                await runTransaction(db, async (transaction) => {
-                    const docRef = getProgressDocRef(userId);
-                    
-                    const newProgress = {
-                        progress: STATE.progress,
-                        totalScore: STATE.totalScore,
-                        streak: STATE.streak,
-                        lastUpdated: new Date().toISOString()
-                    };
-
-                    transaction.set(docRef, newProgress);
-
-                    // Aktualizacja score i lastActive w publicznym rosterze
-                    // Ta operacja wymaga uprawnienia 'write' (update) w regule ROSTER_COLLECTION.
-                    const rosterRef = doc(db, 'artifacts', appId, 'public', 'data', ROSTER_COLLECTION, userId);
-                    transaction.update(rosterRef, { 
-                        score: STATE.totalScore,
-                        lastActive: new Date().toISOString()
-                    });
-                });
-                console.log("Postęp i roster zapisane pomyślnie.");
-            } catch (error) {
-                console.error("Błąd transakcji zapisu postępu:", error);
-            } finally {
-                STATE.isSaving = false;
-            }
-        }
-
-
-        // --- LOGIKA ADAPTACYJNA I ODPOWIEDZI (bez zmian) ---
+        // --- LOGIKA GRY ---
 
         function generateNewProblem() {
-            const problems = [];
-            for (let a = 1; a <= MAX_FACTOR; a++) {
-                for (let b = 1; b <= MAX_FACTOR; b++) {
+            STATE.isProcessing = false;
+            let problemsPool = [];
+
+            for (let a = MIN_FACTOR; a <= MAX_FACTOR; a++) {
+                for (let b = MIN_FACTOR; b <= MAX_FACTOR; b++) {
                     const key = `${a}x${b}`;
-                    const stats = STATE.progress[key] || { correct: 0, attempts: 0, difficulty: MIN_DIFFICULTY };
+                    const stats = STATE.progress[key] || { correct: 0, attempts: 0 };
+                    STATE.progress[key] = stats;
                     
-                    let difficultyScore = 0;
+                    let difficultyScore = 1;
                     if (stats.attempts > 0) {
                         const errorRate = 1 - (stats.correct / stats.attempts);
-                        difficultyScore = errorRate * 10;
+                        difficultyScore = Math.ceil(errorRate * 10) || 1; 
                     }
-
-                    stats.difficulty = Math.ceil(difficultyScore) || MIN_DIFFICULTY; 
-                    STATE.progress[key] = stats;
-
-                    for (let i = 0; i < (stats.difficulty + 1); i++) {
-                        problems.push({ a, b, difficultyScore });
+                    
+                    if (STATE.isDiagnosisPhase) {
+                        problemsPool.push({ a, b });
+                    } else {
+                        // Trening: ważone prawdopodobieństwo
+                        for (let i = 0; i < difficultyScore; i++) {
+                             problemsPool.push({ a, b });
+                        }
                     }
                 }
             }
 
-            const selectedProblem = problems[Math.floor(Math.random() * problems.length)];
+            // Losowanie
+            const selectedProblem = problemsPool[Math.floor(Math.random() * problemsPool.length)] || { a: 2, b: 2 };
             
-            if (selectedProblem) {
-                STATE.currentProblem.a = selectedProblem.a;
-                STATE.currentProblem.b = selectedProblem.b;
-                STATE.currentProblem.result = selectedProblem.a * selectedProblem.b;
-            } else {
-                STATE.currentProblem.a = Math.floor(Math.random() * MAX_FACTOR) + 1;
-                STATE.currentProblem.b = Math.floor(Math.random() * MAX_FACTOR) + 1;
-                STATE.currentProblem.result = STATE.currentProblem.a * STATE.currentProblem.b;
-            }
+            STATE.currentProblem.a = selectedProblem.a;
+            STATE.currentProblem.b = selectedProblem.b;
+            STATE.currentProblem.result = selectedProblem.a * selectedProblem.b;
             
-            STATE.feedbackMessage = '';
-            renderApp();
-            
-            clearInput(); 
+            updateProblemDisplay();
+            resetGridColors();
         }
 
-        function checkAnswer() {
-            const input = document.getElementById('answerInput');
-            const userAnswer = parseInt(input.value.trim());
-            
-            if (isNaN(userAnswer)) {
-                STATE.feedbackMessage = "Wprowadź liczbę!";
-                renderApp();
-                return;
-            }
-            
+        function checkAnswer(selectedNumber, buttonElement) {
+            if (STATE.isProcessing) return;
+            STATE.isProcessing = true; // Blokada
+
             const { a, b, result } = STATE.currentProblem;
             const key = `${a}x${b}`;
 
-            if (!STATE.progress[key]) {
-                STATE.progress[key] = { correct: 0, attempts: 0, difficulty: MIN_DIFFICULTY };
-            }
-
+            if (!STATE.progress[key]) STATE.progress[key] = { correct: 0, attempts: 0 };
             STATE.progress[key].attempts += 1;
-            
-            if (userAnswer === result) {
+
+            if (selectedNumber === result) {
+                // DOBRZE
                 STATE.progress[key].correct += 1;
                 STATE.totalScore += 1;
-                STATE.streak += 1;
-                STATE.feedbackMessage = `Brawo! Poprawna odpowiedź: ${result}. Zdobywasz punkt!`;
+                updateScoreDisplay();
                 
-                if (STATE.progress[key].difficulty > MIN_DIFFICULTY) {
-                    STATE.progress[key].difficulty -= 1;
+                // Efekt wizualny na przycisku
+                buttonElement.classList.remove('bg-white', 'text-gray-700');
+                buttonElement.classList.add('bg-green-500', 'text-white', 'scale-110', 'shadow-green-300');
+                
+                setTimeout(() => {
+                    generateNewProblem();
+                }, 400); // Szybkie przejście
+
+            } else {
+                // ŹLE
+                // Podświetl błędny na czerwono
+                buttonElement.classList.remove('bg-white', 'text-gray-700');
+                buttonElement.classList.add('bg-red-500', 'text-white', 'shake-animation');
+                
+                // Znajdź i podświetl poprawny na zielono (podpowiedź)
+                const correctBtn = document.querySelector(`button[data-value="${result}"]`);
+                if(correctBtn) {
+                    correctBtn.classList.add('bg-green-100', 'text-green-700', 'border-green-500');
                 }
 
                 setTimeout(() => {
                     generateNewProblem();
-                    saveProgress();
-                }, 1000); 
-
-            } else {
-                STATE.streak = 0;
-                STATE.feedbackMessage = `Źle. Spróbuj jeszcze raz. To działanie to ${a} razy ${b}.`;
-                
-                if (STATE.progress[key].difficulty < MAX_DIFFICULTY) {
-                    STATE.progress[key].difficulty += 2;
-                }
-                
-                saveProgress(); 
-                clearInput();
-            }
-            
-            renderApp();
-        }
-
-        function clearInput() {
-            const input = document.getElementById('answerInput');
-            if (input) {
-                input.value = '';
+                }, 1000); // Dłuższa chwila na analizę błędu
             }
         }
 
-        // --- RENDEROWANIE UI ---
+        // --- RENDEROWANIE I UI ---
 
-        function renderApp() {
-            if (!STATE.currentStudentName || STATE.currentStudentName === 'Ładowanie...') {
-                return; // Czekamy na input imienia
-            }
-            renderHeader();
-            renderMainContent();
-            
-            if (!STATE.parentView && !STATE.teacherView) {
-                renderVisualization();
-            } else if (STATE.parentView) {
-                renderParentDashboard();
-            } else if (STATE.teacherView) {
-                renderTeacherDashboard();
-            }
-        }
-
-        function renderHeader() {
-            const header = document.getElementById('appHeader');
-            header.innerHTML = `
-                <div class="flex justify-between items-center p-4 shadow-md" style="background-color: #45B7D1; color: white;">
-                    <h1 class="text-xl font-bold">Mali Mistrzowie 🏆 (${STATE.currentStudentName})</h1>
-                    <div class="flex items-center space-x-4">
-                        <span class="text-sm">ID: ${userId ? userId.substring(0, 8) + '...' : 'Ładowanie...'}</span>
-                        <button id="toggleTeacherViewBtn" title="Przełącz na Panel Nauczyciela" class="bg-white text-gray-800 p-2 rounded-full shadow-lg transition-transform hover:scale-105">
-                            <i class="fas fa-graduation-cap"></i>
-                        </button>
-                        <button id="toggleViewBtn" title="Przełącz na Raport Ucznia" class="bg-white text-gray-800 p-2 rounded-full shadow-lg transition-transform hover:scale-105">
-                            <i class="fas ${STATE.parentView ? 'fa-book-open' : 'fa-chart-bar'}"></i>
-                        </button>
-                    </div>
-                </div>
-                <div class="flex justify-around bg-gray-100 p-2 text-sm text-gray-700">
-                    <span class="font-semibold flex items-center"><i class="fas fa-star text-yellow-500 mr-1"></i> Punkty: ${STATE.totalScore}</span>
-                    <span class="font-semibold flex items-center"><i class="fas fa-fire text-red-500 mr-1"></i> Seria: ${STATE.streak}</span>
-                </div>
-            `;
-            document.getElementById('toggleViewBtn').onclick = toggleParentView;
-            document.getElementById('toggleTeacherViewBtn').onclick = toggleTeacherView;
-        }
-
-        function renderMainContent() {
+        function renderGameInterface() {
             const content = document.getElementById('appContent');
-            content.innerHTML = '';
-            
-            if (STATE.parentView || STATE.teacherView) {
-                // Dashboardy renderowane są w osobnych funkcjach
-                return;
-            }
-
-            // Widok Dziecka (Trening)
-            content.className = 'p-6 space-y-6 flex flex-col items-center';
             content.innerHTML = `
-                <div class="w-full max-w-md bg-white p-8 rounded-xl shadow-2xl text-center border-b-4 border-l-4" style="border-color: #4ECDC4;">
-                    <p class="text-lg text-gray-600 mb-2">Jaki jest wynik?</p>
-                    <div class="text-7xl font-extrabold mb-6" style="color: #45B7D1;">
-                        ${STATE.currentProblem.a} <span class="text-5xl">&times;</span> ${STATE.currentProblem.b}
+                <div class="shrink-0 py-4 flex flex-col items-center justify-center bg-white shadow-sm z-10 relative">
+                    <div class="text-sm text-gray-400 font-semibold tracking-wider uppercase mb-1">${STATE.phaseName}</div>
+                    <div class="text-6xl font-black text-gray-800 flex items-center">
+                        <span class="text-[#45B7D1]">${STATE.currentProblem.a}</span>
+                        <span class="text-gray-300 mx-2 text-4xl">&times;</span>
+                        <span class="text-[#45B7D1]">${STATE.currentProblem.b}</span>
+                        <span class="text-gray-300 mx-2 text-4xl">=</span>
+                        <span class="text-gray-200">?</span>
                     </div>
-                    <div id="visualizationContainer" class="min-h-[100px] flex justify-center items-center flex-wrap">
-                        <!-- Wizualizacja będzie renderowana przez JS -->
-                    </div>
-                    <form id="answerForm" class="flex justify-center mt-6 space-x-2">
-                        <input type="number" id="answerInput" placeholder="Wpisz odpowiedź" class="p-3 border-2 border-gray-300 rounded-lg w-full max-w-[200px] text-center text-xl focus:border-[#45B7D1] outline-none transition" inputmode="numeric">
-                        <button type="submit" class="p-3 bg-green-500 text-white rounded-lg font-bold shadow-md hover:bg-green-600 transition-colors">
-                            <i class="fas fa-check"></i>
-                        </button>
-                    </form>
-                    <p id="feedbackMessage" class="mt-4 text-md font-semibold ${STATE.feedbackMessage.includes('Brawo') ? 'text-green-600' : 'text-red-500'}">
-                        ${STATE.feedbackMessage}
-                    </p>
-                    <p class="mt-2 text-xs text-gray-400">Poziom trudności tego zadania (AI): ${STATE.progress[`${STATE.currentProblem.a}x${STATE.currentProblem.b}`]?.difficulty || MIN_DIFFICULTY}/${MAX_DIFFICULTY}</p>
                 </div>
-            `;
-            document.getElementById('answerForm').onsubmit = (e) => {
-                e.preventDefault();
-                checkAnswer();
-            };
-        }
 
-        function renderVisualization() {
-            const container = document.getElementById('visualizationContainer');
-            if (!container) return; 
-
-            container.innerHTML = '';
-
-            const { a, b } = STATE.currentProblem;
-            
-            if (a > 6 || b > 6) {
-                container.innerHTML = `<p class="text-sm text-gray-500 mt-2">Dla większych liczb skup się na rachunku!</p>`;
-                return;
-            }
-
-            const grid = document.createElement('div');
-            grid.className = 'grid p-4 gap-2 bg-yellow-50 rounded-xl shadow-inner';
-            grid.style.gridTemplateColumns = `repeat(${b}, minmax(0, 1fr))`;
-
-            for (let i = 0; i < a * b; i++) {
-                const dot = document.createElement('div');
-                dot.className = 'w-4 h-4 rounded-full shadow-md transition-transform duration-100 ease-in-out hover:scale-110';
-                dot.style.backgroundColor = '#4ECDC4';
-                grid.appendChild(dot);
-            }
-
-            container.appendChild(grid);
-        }
-
-        function renderParentDashboard() {
-            const content = document.getElementById('appContent');
-            content.className = 'p-6 space-y-6';
-            
-            let currentStudentInfo = STATE.currentStudentName;
-            if(STATE.teacherView && STATE.currentStudentId !== userId) {
-                 currentStudentInfo = `UCZEŃ: ${STATE.currentStudentName}`;
-            } else if(STATE.teacherView) {
-                 currentStudentInfo = `WŁASNY RAPORT (w trybie nauczyciela)`;
-            }
-
-            content.innerHTML = `
-                <div class="bg-white p-6 rounded-xl shadow-2xl">
-                    <h2 class="text-2xl font-bold mb-4" style="color: #45B7D1;">Raport Postępów (${currentStudentInfo})</h2>
-                    <p class="mb-4 text-sm text-gray-600">Poniżej znajduje się mapa opanowania tabliczki mnożenia (1-10).</p>
-                    <div id="progressGrid" class="grid grid-cols-11 gap-1 border border-gray-200 p-2 rounded-lg">
-                        <!-- Nagłówki osi X -->
-                        <div class="text-center font-bold text-gray-500">x</div>
-                        ${Array.from({ length: MAX_FACTOR }, (_, i) => `<div class="text-center font-bold text-gray-700">${i + 1}</div>`).join('')}
-
-                        <!-- Komórki wyników -->
-                        ${Array.from({ length: MAX_FACTOR }, (_, aIndex) => {
-                            const a = aIndex + 1;
-                            let row = `<div class="text-center font-bold text-gray-700 p-1">${a}</div>`; // Nagłówek osi Y
-                            for (let bIndex = 0; bIndex < MAX_FACTOR; bIndex++) {
-                                const b = bIndex + 1;
-                                const key = `${a}x${b}`;
-                                const stats = STATE.progress[key] || { correct: 0, attempts: 0 };
-                                
-                                let colorClass = 'bg-gray-200';
-                                let tooltip = 'Brak danych';
-                                
-                                if (stats.attempts > 0) {
-                                    const percentage = (stats.correct / stats.attempts) * 100;
-                                    tooltip = `${a}x${b} = ${a * b}. Poprawność: ${stats.correct}/${stats.attempts} (${percentage.toFixed(0)}%)`;
-
-                                    if (percentage >= 90) {
-                                        colorClass = 'bg-green-500';
-                                    } else if (percentage >= 60) {
-                                        colorClass = 'bg-yellow-500';
-                                    } else {
-                                        colorClass = 'bg-red-500';
-                                    }
-                                }
-                                
-                                row += `<div class="w-full h-8 flex items-center justify-center text-white text-xs rounded-sm ${colorClass} transition-all hover:scale-110 hover:z-10 relative group cursor-pointer">
-                                            ${a * b}
-                                            <span class="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 px-3 py-1 bg-gray-800 text-white text-xs rounded-lg opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap">${tooltip}</span>
-                                        </div>`;
-                            }
-                            return row;
-                        }).join('')}
-                    </div>
-                    <div class="mt-6">
-                        <h3 class="text-lg font-semibold mb-2" style="color: #F7B801;">Legenda Trudności:</h3>
-                        <div class="flex flex-wrap gap-4 text-sm">
-                            <span class="flex items-center"><span class="w-4 h-4 rounded-full bg-green-500 mr-2"></span> Opanowane ($\geq 90\%$ poprawności)</span>
-                            <span class="flex items-center"><span class="w-4 h-4 rounded-full bg-yellow-500 mr-2"></span> Wymaga powtórki ($60-89\%$ poprawności)</span>
-                            <span class="flex items-center"><span class="w-4 h-4 rounded-full bg-red-500 mr-2"></span> Problematyczne ( $< 60\%$ poprawności)</span>
-                            <span class="flex items-center"><span class="w-4 h-4 rounded-full bg-gray-200 mr-2"></span> Nieprzetestowane</span>
+                <div class="flex-grow bg-slate-100 p-2 overflow-y-auto">
+                    <div class="grid grid-cols-5 gap-2 h-full content-center max-w-md mx-auto" id="resultsGrid">
                         </div>
-                    </div>
-                    <div class="mt-6 p-4 bg-gray-50 rounded-lg text-sm">
-                         <p>ID użytkownika: <code class="font-mono bg-gray-200 p-1 rounded break-all">${STATE.currentStudentId || 'Ładowanie...'}</code></p>
-                    </div>
-                </div>
-            `;
-        }
-        
-        // --- NOWY PANEL DLA NAUCZYCIELA ---
-
-        async function renderTeacherDashboard() {
-            const content = document.getElementById('appContent');
-            content.className = 'p-6 space-y-6';
-
-            // Ładowanie listy uczniów
-            content.innerHTML = `
-                <div class="bg-white p-6 rounded-xl shadow-2xl w-full max-w-2xl mx-auto">
-                    <h2 class="text-2xl font-bold mb-4" style="color: #45B7D1;">Panel Nauczyciela: Lista Uczniów</h2>
-                    <p class="mb-4 text-sm text-gray-600">Kliknij na imię ucznia, aby zobaczyć szczegółowy raport postępów.</p>
-                    <div id="rosterList" class="space-y-3">
-                        <div class="text-center p-8 text-gray-400"><i class="fas fa-spinner fa-spin mr-2"></i>Ładowanie listy uczniów...</div>
-                    </div>
-                </div>
-                <div id="studentReportContainer">
-                    <!-- Tutaj załaduje się raport ucznia (renderParentDashboard) -->
                 </div>
             `;
 
-            const rosterListDiv = document.getElementById('rosterList');
-            
-            try {
-                // Ta operacja wymaga uprawnienia 'read' w regule ROSTER_COLLECTION.
-                const rosterSnapshot = await getDocs(query(getClassRosterRef()));
-                STATE.roster = rosterSnapshot.docs.map(doc => doc.data()).sort((a, b) => b.score - a.score); // Sortuj po wyniku
-
-                if (STATE.roster.length === 0) {
-                    rosterListDiv.innerHTML = `<div class="text-center p-8 text-gray-400">Brak zarejestrowanych uczniów.</div>`;
-                    return;
-                }
-
-                rosterListDiv.innerHTML = `
-                    <div class="grid grid-cols-3 font-bold text-sm text-gray-700 border-b pb-1">
-                        <div>Imię Ucznia</div>
-                        <div class="text-center">Punkty</div>
-                        <div class="text-center">Ostatnia Aktywność</div>
-                    </div>
-                    ${STATE.roster.map(student => `
-                        <button data-uid="${student.uid}" 
-                                data-name="${student.name}"
-                                class="student-button grid grid-cols-3 items-center p-3 rounded-lg text-left shadow-sm transition-colors hover:bg-indigo-100 ${student.uid === STATE.currentStudentId ? 'bg-indigo-200 font-semibold' : 'bg-white'}">
-                            <div class="text-lg">${student.name} ${student.uid === userId ? '(Ty)' : ''}</div>
-                            <div class="text-center font-bold text-green-600">${student.score}</div>
-                            <div class="text-center text-sm text-gray-500">${timeAgo(student.lastActive)}</div>
-                        </button>
-                    `).join('')}
+            const grid = document.getElementById('resultsGrid');
+            SORTED_RESULTS.forEach(num => {
+                const btn = document.createElement('button');
+                btn.className = `
+                    bg-white text-gray-700 font-bold text-xl rounded-lg shadow-sm border-b-2 border-gray-200 
+                    active:border-b-0 active:translate-y-[2px] transition-all duration-75 
+                    flex items-center justify-center aspect-square select-none
                 `;
-
-                // Dodanie event listenerów do przycisków
-                document.querySelectorAll('.student-button').forEach(button => {
-                    button.onclick = (e) => {
-                        const uid = e.currentTarget.getAttribute('data-uid');
-                        const name = e.currentTarget.getAttribute('data-name');
-                        switchStudentView(uid, name);
-                    };
-                });
+                btn.dataset.value = num;
+                btn.textContent = num;
                 
-                // Jeśli jest to pierwszy raz, automatycznie załaduj raport bieżącego użytkownika.
-                if (STATE.currentStudentId === userId) {
-                    // Wywołanie renderParentDashboard bez przeładowania listy uczniów
-                    document.getElementById('studentReportContainer').innerHTML = renderParentDashboard();
+                // Obsługa dotyku (Touch Start dla szybszej reakcji niż Click)
+                btn.addEventListener('touchstart', (e) => {
+                    e.preventDefault(); // Zapobiega podwójnemu odpaleniu click
+                    checkAnswer(num, btn);
+                }, {passive: false});
+
+                // Fallback dla myszki
+                btn.onclick = () => checkAnswer(num, btn);
+
+                grid.appendChild(btn);
+            });
+            
+            updateProblemDisplay();
+        }
+
+        function updateProblemDisplay() {
+            // Funkcja pomocnicza, jeśli chcielibyśmy aktualizować tylko górną część bez przeładowania gridu
+            const display = document.querySelector('.text-6xl');
+            if(display) {
+                display.innerHTML = `
+                    <span class="text-[#45B7D1]">${STATE.currentProblem.a}</span>
+                    <span class="text-gray-300 mx-2 text-4xl">&times;</span>
+                    <span class="text-[#45B7D1]">${STATE.currentProblem.b}</span>
+                    <span class="text-gray-300 mx-2 text-4xl">=</span>
+                    <span class="text-gray-300">?</span>
+                `;
+            }
+        }
+
+        function resetGridColors() {
+            const buttons = document.querySelectorAll('#resultsGrid button');
+            buttons.forEach(btn => {
+                btn.className = `
+                    bg-white text-gray-700 font-bold text-xl rounded-lg shadow-sm border-b-2 border-gray-200 
+                    active:border-b-0 active:translate-y-[2px] transition-all duration-75 
+                    flex items-center justify-center aspect-square select-none
+                `;
+            });
+        }
+
+        function updateScoreDisplay() {
+            const el = document.getElementById('scoreDisplay');
+            if(el) el.textContent = STATE.totalScore;
+        }
+
+        // --- ZARZĄDZANIE CZASEM I FAZAMI ---
+
+        function startTimer() {
+            if (STATE.timer) clearInterval(STATE.timer);
+            const timerEl = document.getElementById('timerDisplay');
+            
+            STATE.timer = setInterval(() => {
+                STATE.timeLeft -= 1;
+                if(timerEl) timerEl.textContent = STATE.timeLeft;
+
+                if (STATE.timeLeft <= 0) {
+                    clearInterval(STATE.timer);
+                    endPhase();
                 }
-
-            } catch (error) {
-                // Ta sekcja wykonuje się przy błędzie braku uprawnień (Missing or insufficient permissions)
-                rosterListDiv.innerHTML = `<div class="text-center p-8 text-red-500">
-                    <i class="fas fa-exclamation-triangle mr-2"></i>
-                    Błąd ładowania listy. Sprawdź, czy reguły Firestore zezwalają na odczyt kolekcji 'class_roster'.
-                </div>`;
-                console.error("Błąd ładowania listy uczniów (Brak uprawnień?):", error);
-            }
+            }, 1000);
         }
 
-        /**
-         * Przełącza wyświetlany raport na innego ucznia i ponownie ładuje dane.
-         */
-        function switchStudentView(uid, name) {
-            STATE.currentStudentId = uid;
-            STATE.currentStudentName = name;
-            // Przeładuj dane postępu dla wybranego UID
-            loadProgress(uid); 
+        function startDiagnosis() {
+            STATE.totalScore = 0;
+            STATE.timeLeft = DIAGNOSIS_TIME_SECONDS;
+            STATE.isDiagnosisPhase = true;
+            STATE.phaseName = 'Diagnoza';
+            STATE.progress = {};
             
-            // Zmieniamy tylko widok raportu w kontenerze, nie całą stronę.
-            const reportContainer = document.getElementById('studentReportContainer');
-            if (reportContainer) {
-                 reportContainer.innerHTML = renderParentDashboard();
-            }
-            renderTeacherDashboard(); // Odśwież listę, aby podświetlić aktywnego ucznia
+            renderGameInterface();
+            generateNewProblem();
+            startTimer();
+            updateScoreDisplay();
         }
 
-        // --- FUNKCJE POMOCNICZE UI ---
-
-        function toggleParentView() {
-            STATE.parentView = !STATE.parentView;
-            STATE.teacherView = false; // Wyłącz widok nauczyciela
-            // Reset do własnego postępu
-            STATE.currentStudentId = userId; 
-            loadProgress(userId); 
-            renderApp();
-        }
-
-        async function toggleTeacherView() {
-            STATE.teacherView = !STATE.teacherView;
-            STATE.parentView = false; // Wyłącz widok rodzica
+        function startTargetedTraining() {
+            STATE.totalScore = 0;
+            STATE.timeLeft = DIAGNOSIS_TIME_SECONDS;
+            STATE.isDiagnosisPhase = false;
+            STATE.phaseName = 'Trening';
             
-            // Ustaw domyślnie na bieżącego użytkownika (nauczyciela)
-            STATE.currentStudentId = userId;
-            loadProgress(userId);
-            
-            if (STATE.teacherView) {
-                // Konieczne jest ponowne załadowanie, aby załadować listę uczniów
-                await renderTeacherDashboard();
-            }
-            renderApp();
+            renderGameInterface();
+            generateNewProblem();
+            startTimer();
+            updateScoreDisplay();
         }
 
-        function renderNameInput() {
+        function endPhase() {
             const content = document.getElementById('appContent');
-            content.className = 'p-6 space-y-6 flex flex-col items-center min-h-screen justify-center';
+            const summary = summarizeProgress();
+            
+            let btnText = STATE.isDiagnosisPhase ? 'Rozpocznij Trening' : 'Nowa Diagnoza';
+            let nextAction = STATE.isDiagnosisPhase ? startTargetedTraining : startDiagnosis;
+
             content.innerHTML = `
-                <div class="w-full max-w-md bg-white p-8 rounded-xl shadow-2xl text-center border-b-4 border-l-4" style="border-color: #4ECDC4;">
-                    <h2 class="text-2xl font-bold mb-4" style="color: #45B7D1;">Witaj!</h2>
-                    <p class="text-lg text-gray-600 mb-6">Jak masz na imię? (Użyjemy tego do śledzenia Twoich postępów.)</p>
-                    <input type="text" id="userNameInput" placeholder="Twoje imię lub pseudonim" class="p-3 border-2 border-gray-300 rounded-lg w-full max-w-[200px] text-center text-xl focus:border-[#45B7D1] outline-none transition" inputmode="text" maxlength="12">
-                    <button id="saveNameBtn" class="mt-4 p-3 w-full bg-green-500 text-white rounded-lg font-bold shadow-md hover:bg-green-600 transition-colors">
-                        Rozpocznij Trening!
-                    </button>
+                <div class="flex-grow flex flex-col items-center justify-center p-6 bg-[#f0f4f8] text-center">
+                    <div class="bg-white p-6 rounded-2xl shadow-xl w-full max-w-md">
+                        <h2 class="text-2xl font-bold text-gray-800 mb-2">Koniec czasu!</h2>
+                        <div class="text-5xl font-black text-[#45B7D1] mb-4">${STATE.totalScore} <span class="text-lg text-gray-400 font-normal">pkt</span></div>
+                        
+                        <div class="bg-gray-50 rounded-lg p-4 text-left mb-6 max-h-48 overflow-y-auto">
+                            <h3 class="text-xs font-bold text-gray-400 uppercase tracking-wide mb-2">Do poprawy:</h3>
+                            ${summary.list.length > 0 ? 
+                                summary.list.map(item => `
+                                    <div class="flex justify-between items-center py-1 border-b border-gray-100 last:border-0">
+                                        <span class="font-mono font-bold text-gray-700">${item.key}</span>
+                                        <span class="text-sm text-red-500 font-bold">${item.correct}/${item.attempts}</span>
+                                    </div>
+                                `).join('')
+                                : '<div class="text-green-500 text-sm font-bold text-center">Wszystko super! 🎉</div>'
+                            }
+                        </div>
+
+                        <button id="nextPhaseBtn" class="w-full py-4 bg-indigo-600 text-white rounded-xl font-bold shadow-lg hover:bg-indigo-700 active:scale-95 transition-all text-xl">
+                            ${btnText}
+                        </button>
+                    </div>
                 </div>
             `;
-        }
-        
-        // Konwertuje ISOString na format "X minut temu"
-        function timeAgo(dateString) {
-            const now = new Date();
-            const past = new Date(dateString);
-            const seconds = Math.floor((now - past) / 1000);
-
-            if (seconds < 60) return 'teraz';
-            if (seconds < 3600) return `${Math.floor(seconds / 60)} min. temu`;
-            if (seconds < 86400) return `${Math.floor(seconds / 3600)} godz. temu`;
-            return `${Math.floor(seconds / 86400)} dni temu`;
+            
+            document.getElementById('nextPhaseBtn').onclick = nextAction;
         }
 
-        // Inicjalizacja
-        window.onload = initializeFirebase;
+        function summarizeProgress() {
+            const summaryList = [];
+            for (const key in STATE.progress) {
+                const stats = STATE.progress[key];
+                if (stats.attempts > 0) {
+                    const percentage = (stats.correct / stats.attempts) * 100;
+                    if (percentage < 100) { // Pokazujemy każdy błąd w podsumowaniu
+                        summaryList.push({ key, percentage, ...stats });
+                    }
+                }
+            }
+            summaryList.sort((a, b) => a.percentage - b.percentage);
+            return { list: summaryList.slice(0, 5) };
+        }
+
+        // Init
+        window.onload = () => {
+            document.getElementById('startBtn').onclick = startDiagnosis;
+        };
     </script>
-    <style>
-        body {
-            font-family: 'Inter', sans-serif;
-            background-color: #f0f4f8;
-        }
-    </style>
-</head>
-<body>
-
-    <div id="appHeader" class="sticky top-0 z-10">
-        <!-- Nagłówek i statystyki -->
-    </div>
-
-    <div id="appContent">
-        <!-- Główna treść (Trening lub Raport) -->
-        <div class="p-8 text-center text-gray-500">
-            <i class="fas fa-spinner fa-spin text-4xl" style="color: #45B7D1;"></i>
-            <p class="mt-4">Ładowanie danych ucznia...</p>
-        </div>
-    </div>
-    
 </body>
 </html>
